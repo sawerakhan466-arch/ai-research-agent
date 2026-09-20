@@ -3,6 +3,8 @@
 #  1. Removes the internal 'cache_breakpoint' key that Groq rejects.
 #  2. If Groq says "rate limit reached" (free tier = 8000 tokens/minute),
 #     it waits a few seconds and retries that one call automatically.
+#  3. If the model tries to call a tool that does not exist
+#     ("tool_use_failed"), it just tries that call again.
 # ---------------------------------------------------------------
 import re
 import time
@@ -32,6 +34,16 @@ def _wait_seconds(error_text):
     return int(m.group(1) or 0) * 60 + float(m.group(2)) + 2
 
 
+def _is_tool_glitch(text):
+    """True when the model tried to call a tool that does not exist."""
+    t = str(text).lower()
+    return (
+        "tool_use_failed" in t
+        or "tool call validation failed" in t
+        or "not in request.tools" in t
+    )
+
+
 if not getattr(litellm.completion, "_cache_fix", False):
     _original_completion = litellm.completion
 
@@ -45,6 +57,10 @@ if not getattr(litellm.completion, "_cache_fix", False):
                 if attempt == _MAX_TRIES:
                     raise
                 time.sleep(min(_wait_seconds(str(e)), 60))
+            except litellm.BadRequestError as e:
+                if attempt == _MAX_TRIES or not _is_tool_glitch(e):
+                    raise
+                time.sleep(1)  # model made a wrong tool call, try the call again
 
     _patched_completion._cache_fix = True
     litellm.completion = _patched_completion
@@ -79,7 +95,9 @@ def _run_once(topic: str, api_key: str) -> str:
         goal="Research topics using web search and write clear, accurate, well-structured reports.",
         backstory=(
             "You are an experienced analyst who searches the web, compares sources, "
-            "and writes factual reports. You never invent facts or links."
+            "and writes factual reports. You never invent facts or links. "
+            "Your ONLY tool is 'DuckDuckGo Search'. You cannot open web pages or files, "
+            "so you work only from the search result titles, links and snippets."
         ),
         tools=[search_web],
         llm=llm,
@@ -92,6 +110,7 @@ def _run_once(topic: str, api_key: str) -> str:
         description=(
             "Research the topic: {topic}\n\n"
             "Use the DuckDuckGo Search tool 2 to 3 times with different queries. "
+            "Do NOT try to open links or files and do not call any other tool. "
             "Then write a report of about 600 to 800 words based only on what you found."
         ),
         expected_output=(
@@ -114,7 +133,7 @@ def _run_once(topic: str, api_key: str) -> str:
 
 
 def run_research(topic: str, api_key: str) -> str:
-    """Runs the agent. If Groq's free per-minute limit is hit, waits and tries again."""
+    """Runs the agent. Retries when Groq's rate limit or a wrong tool call happens."""
     tries = 3
     for attempt in range(1, tries + 1):
         try:
@@ -122,8 +141,11 @@ def run_research(topic: str, api_key: str) -> str:
         except Exception as e:
             low = f"{type(e).__name__} {e}".lower()
             is_rate_limit = "rate limit" in low or "ratelimit" in low or "rate_limit" in low
-            if is_rate_limit and attempt < tries:
+            if attempt < tries and is_rate_limit:
                 # wait at least 30 seconds so Groq's 1-minute window can clear
                 time.sleep(min(max(_wait_seconds(str(e)), 30), 90))
+                continue
+            if attempt < tries and _is_tool_glitch(low):
+                time.sleep(2)
                 continue
             raise
