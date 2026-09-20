@@ -16,7 +16,7 @@ BRAND_TAGLINE = "Powered by"
 
 EXAMPLE_TOPICS = [
     "Future of AI in healthcare",
-    "Renewable energy in Pakistan",
+    "Latest trends in Generative AI",
     "How do AI agents work?",
 ]
 
