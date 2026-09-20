@@ -1,5 +1,47 @@
+# ---------------------------------------------------------------
+# FIX for CrewAI + Groq bug ("property 'cache_breakpoint' is unsupported")
+# CrewAI adds an internal 'cache_breakpoint' key to messages and Groq rejects it.
+# This code removes that key before the request is sent.
+# It must stay ABOVE "from crewai import ..." below.
+# ---------------------------------------------------------------
+import litellm
+
+_BAD_KEY = "cache_breakpoint"
+
+
+def _clean_messages(messages):
+    if not isinstance(messages, list):
+        return messages
+    cleaned = []
+    for m in messages:
+        if isinstance(m, dict) and _BAD_KEY in m:
+            m = {k: v for k, v in m.items() if k != _BAD_KEY}
+        cleaned.append(m)
+    return cleaned
+
+
+if not getattr(litellm.completion, "_cache_fix", False):
+    _original_completion = litellm.completion
+
+    def _patched_completion(*args, **kwargs):
+        if "messages" in kwargs:
+            kwargs["messages"] = _clean_messages(kwargs["messages"])
+        return _original_completion(*args, **kwargs)
+
+    _patched_completion._cache_fix = True
+    litellm.completion = _patched_completion
+# ---------------------------------------------------------------
+
 from crewai import Agent, Task, Crew, Process, LLM
 from tools import search_web
+
+# Extra safety: stop CrewAI from adding the key at all (ignored if not possible)
+try:
+    import crewai.llms.cache as _crewai_cache
+
+    _crewai_cache.mark_cache_breakpoint = lambda msg, *a, **k: msg
+except Exception:
+    pass
 
 MODEL_NAME = "groq/openai/gpt-oss-120b"
 
